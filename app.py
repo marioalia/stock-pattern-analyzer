@@ -12,17 +12,18 @@ import yfinance as yf
 import streamlit as st
 
 # Configuration Variables
-MIN_PRICE = 10.0  # Minimum stock price
+MIN_PRICE = 15.0  # Increased to filter more tickers
 VOLUME_THRESHOLD = 2_000_000  # Minimum average daily volume
-TIMEFRAMES = ['4hour', 'day', 'week', 'month', 'quarter']  # Timeframes including 4hour
+TIMEFRAMES = ['4hour', 'day', 'week', 'month', 'quarter']  # Timeframes
 BATCH_SIZE = 200  # Number of tickers to process concurrently
+TICKER_LIMIT = 20  # Limit earnings data to 20 tickers
 CACHE_FILE = "filtered_inside.json"
-CACHE_EXPIRY = 86400  # Cache expiry in seconds (24 hours)
-FLOAT_VOL_LOOKBACK = 10  # Number of periods to calculate float traded
-FLOAT_TRADED_THRESHOLD = 0.05  # Reduced to 5% to filter more tickers
-EARNINGS_CACHE = {}  # In-memory cache for earnings data
-EARNINGS_CACHE_EXPIRY = 3600  # Earnings cache expiry in seconds (1 hour)
-YF_DELAY = 0.5  # Delay between yfinance API calls in seconds
+CACHE_EXPIRY = 86400  # Cache expiry (24 hours)
+EARNINGS_CACHE_FILE = "earnings_cache.json"
+EARNINGS_CACHE_EXPIRY = 3600  # Earnings cache expiry (1 hour)
+FLOAT_VOL_LOOKBACK = 10  # Periods for float traded
+FLOAT_TRADED_THRESHOLD = 0.05  # 5% float traded
+YF_DELAY = 1.0  # Increased delay for yfinance API calls (seconds)
 
 # Setup Logging
 logging.basicConfig(
@@ -123,17 +124,20 @@ async def analyze_ticker(session, ticker, timeframe):
     return result
 
 async def fetch_earnings_data(ticker):
-    # Check in-memory cache
-    current_time = time.time()
-    if ticker in EARNINGS_CACHE:
-        cached = EARNINGS_CACHE[ticker]
-        if current_time - cached['timestamp'] < EARNINGS_CACHE_EXPIRY:
-            logger.info(f"Using cached earnings data for {ticker}")
-            return cached['data']
-    
+    # Check disk-based cache
+    try:
+        if os.path.exists(EARNINGS_CACHE_FILE):
+            with open(EARNINGS_CACHE_FILE, 'r') as f:
+                cache_data = json.load(f)
+            if ticker in cache_data and (time.time() - cache_data[ticker]['timestamp'] < EARNINGS_CACHE_EXPIRY):
+                logger.info(f"Using cached earnings data for {ticker}")
+                return cache_data[ticker]['data']
+    except Exception as e:
+        logger.warning(f"Failed to read earnings cache: {e}")
+
     # Delay to avoid yfinance rate limits
     await asyncio.sleep(YF_DELAY)
-    
+
     try:
         yf_ticker = yf.Ticker(ticker)
         earnings_dates = yf_ticker.calendar
@@ -156,18 +160,28 @@ async def fetch_earnings_data(ticker):
             previous_earnings = earnings_history.index[-1] if not earnings_history.empty else pd.NaT
         else:
             previous_earnings = pd.NaT
-        
+
         result = {
             'ticker': ticker,
             'previous_earnings': previous_earnings,
             'next_earnings': next_earnings
         }
-        
-        # Cache the result
-        EARNINGS_CACHE[ticker] = {
-            'timestamp': current_time,
-            'data': result
-        }
+
+        # Update disk-based cache
+        try:
+            cache_data = {}
+            if os.path.exists(EARNINGS_CACHE_FILE):
+                with open(EARNINGS_CACHE_FILE, 'r') as f:
+                    cache_data = json.load(f)
+            cache_data[ticker] = {
+                'timestamp': time.time(),
+                'data': result
+            }
+            with open(EARNINGS_CACHE_FILE, 'w') as f:
+                json.dump(cache_data, f)
+        except Exception as e:
+            logger.warning(f"Failed to write earnings cache: {e}")
+
         return result
     except Exception as e:
         logger.warning(f"Couldn't fetch earnings for {ticker}: {e}")
@@ -286,9 +300,10 @@ async def main():
             if data['inside'] or data['engulfing']
         }
 
-        # Fetch earnings data only for filtered tickers
-        st.write(f"Fetching earnings data for {len(filtered_tickers)} tickers...")
-        earnings_tasks = [fetch_earnings_data(ticker) for ticker in filtered_tickers.keys()]
+        # Fetch earnings data only for limited tickers
+        ticker_keys = list(filtered_tickers.keys())[:TICKER_LIMIT]
+        st.write(f"Fetching earnings data for {len(ticker_keys)} tickers (limited to {TICKER_LIMIT})...")
+        earnings_tasks = [fetch_earnings_data(ticker) for ticker in ticker_keys]
         earnings_results = await asyncio.gather(*earnings_tasks, return_exceptions=True)
 
         # Integrate earnings data into filtered_tickers
@@ -299,6 +314,10 @@ async def main():
             if ticker in filtered_tickers:
                 filtered_tickers[ticker]['previous_earnings'] = earnings_result['previous_earnings']
                 filtered_tickers[ticker]['next_earnings'] = earnings_result['next_earnings']
+            else:
+                # Set N/A for tickers beyond the limit
+                filtered_tickers[ticker]['previous_earnings'] = pd.NaT
+                filtered_tickers[ticker]['next_earnings'] = pd.NaT
 
         # Sort filtered tickers by avg_float_traded in ascending order
         sorted_tickers = sorted(filtered_tickers.items(), key=lambda x: x[1]['avg_float_traded'], reverse=False)
@@ -334,8 +353,8 @@ async def main():
         logger.info("Script execution completed.")
 
 # Streamlit App
-st.title("Pattern Analyzer")
-st.write("Analyzing.")
+st.title("Stock Pattern Analyzer")
+st.write("Analyze stocks for inside and engulfing bars with float traded and earnings data.")
 
 if st.button("Run Analysis"):
     if not api_key or api_key == "bo":
