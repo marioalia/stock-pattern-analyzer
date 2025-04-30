@@ -15,11 +15,11 @@ import streamlit as st
 MIN_PRICE = 10.0  # Minimum stock price
 VOLUME_THRESHOLD = 2_000_000  # Minimum average daily volume
 TIMEFRAMES = ['4hour', 'day', 'week', 'month', 'quarter']  # Timeframes including 4hour
-BATCH_SIZE = 700  # Number of tickers to process concurrently
+BATCH_SIZE = 200  # Reduced for Streamlit Cloud performance
 CACHE_FILE = "filtered_inside.json"
 CACHE_EXPIRY = 86400  # Cache expiry in seconds (24 hours)
 FLOAT_VOL_LOOKBACK = 10  # Number of periods to calculate float traded
-FLOAT_TRADED_THRESHOLD = 0.05  # Minimum % float traded (5%)
+FLOAT_TRADED_THRESHOLD = 0.08  # Minimum % float traded (8%)
 
 # Setup Logging
 logging.basicConfig(
@@ -33,7 +33,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize Polygon client
-api_key = os.getenv("POLYGON_API_KEY") or "b"  # Replace with your Polygon API key
+api_key = os.getenv("POLYGON_API_KEY") or st.text_input("Polygon API Key", type="password", value="bo")
+if not api_key or api_key == "bo":
+    st.warning("Please provide a valid Polygon API key.")
 client = RESTClient(api_key)
 
 async def fetch_stock_data(session, ticker, timeframe, start_date, end_date):
@@ -152,16 +154,20 @@ async def fetch_earnings_data(ticker):
     }
 
 async def get_filtered_tickers(rest_client):
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, 'r') as f:
-            cache_data = json.load(f)
-        if time.time() - cache_data['timestamp'] < CACHE_EXPIRY:
-            logger.info("Using cached filtered tickers.")
-            return cache_data['tickers']
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r') as f:
+                cache_data = json.load(f)
+            if time.time() - cache_data['timestamp'] < CACHE_EXPIRY:
+                logger.info("Using cached filtered tickers.")
+                return cache_data['tickers']
+    except Exception as e:
+        logger.warning(f"Failed to read cache file: {e}")
 
     tickers = []
     all_tickers = [ticker.ticker for ticker in rest_client.list_tickers(market='stocks', type='CS', active=True, limit=1000)]
     logger.info(f"Retrieved {len(all_tickers)} active U.S. stock tickers.")
+    st.write(f"Retrieved {len(all_tickers)} tickers for analysis.")
 
     async with aiohttp.ClientSession() as session:
         for i in range(0, len(all_tickers), BATCH_SIZE):
@@ -176,6 +182,7 @@ async def get_filtered_tickers(rest_client):
                     if last_price >= MIN_PRICE:
                         price_filtered.append(ticker)
                 logger.info(f"Price filtered {len(price_filtered)} tickers in batch {i//BATCH_SIZE + 1}")
+                st.write(f"Price filtered {len(price_filtered)} tickers in batch {i//BATCH_SIZE + 1}")
 
                 end_date = datetime.now().strftime('%Y-%m-%d')
                 start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
@@ -194,13 +201,18 @@ async def get_filtered_tickers(rest_client):
                         logger.debug(f"Included {ticker}: Price={df['close'].iloc[-1]}, Avg Volume={avg_volume:,.0f}")
 
                 logger.info(f"Processed batch {i//BATCH_SIZE + 1} of {len(all_tickers)//BATCH_SIZE + 1}")
+                st.write(f"Processed batch {i//BATCH_SIZE + 1} of {len(all_tickers)//BATCH_SIZE + 1}")
             except Exception as e:
                 logger.error(f"Error processing snapshot batch {i//BATCH_SIZE + 1}: {e}")
+                st.error(f"Error processing batch {i//BATCH_SIZE + 1}: {e}")
             await asyncio.sleep(0.05)
 
     logger.info(f"Filtered {len(tickers)} tickers")
-    with open(CACHE_FILE, 'w') as f:
-        json.dump({'timestamp': time.time(), 'tickers': tickers}, f)
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump({'timestamp': time.time(), 'tickers': tickers}, f)
+    except Exception as e:
+        logger.warning(f"Failed to write cache file: {e}")
     return tickers
 
 async def process_batch(session, tickers):
@@ -215,7 +227,6 @@ async def main():
     rest_client = RESTClient(api_key=api_key)
     try:
         tickers = await get_filtered_tickers(rest_client)
-        st.write(f"Retrieved {len(tickers)} tickers for analysis.")
 
         results = []
         async with aiohttp.ClientSession() as session:
@@ -302,14 +313,11 @@ async def main():
 st.title("Stock Pattern Analyzer")
 st.write("Analyze stocks for inside and engulfing bars with float traded and earnings data.")
 
-# Input for Polygon API Key (optional, if not set via environment)
-api_key_input = st.text_input("Polygon API Key (leave blank if set in environment)", type="password")
-if api_key_input:
-    api_key = api_key_input
-
-# Button to run the analysis
 if st.button("Run Analysis"):
-    with st.spinner("Running analysis... This may take a few minutes."):
-        asyncio.run(main())
+    if not api_key or api_key == "bo":
+        st.error("Please enter a valid Polygon API key above.")
+    else:
+        with st.spinner("Running analysis... This may take a few minutes."):
+            asyncio.run(main())
 else:
     st.write("Click the button to start the analysis.")
