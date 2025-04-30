@@ -15,11 +15,14 @@ import streamlit as st
 MIN_PRICE = 10.0  # Minimum stock price
 VOLUME_THRESHOLD = 2_000_000  # Minimum average daily volume
 TIMEFRAMES = ['4hour', 'day', 'week', 'month', 'quarter']  # Timeframes including 4hour
-BATCH_SIZE = 200  # Reduced for Streamlit Cloud performance
+BATCH_SIZE = 200  # Number of tickers to process concurrently
 CACHE_FILE = "filtered_inside.json"
 CACHE_EXPIRY = 86400  # Cache expiry in seconds (24 hours)
 FLOAT_VOL_LOOKBACK = 10  # Number of periods to calculate float traded
-FLOAT_TRADED_THRESHOLD = 0.08  # Minimum % float traded (8%)
+FLOAT_TRADED_THRESHOLD = 0.05  # Reduced to 5% to filter more tickers
+EARNINGS_CACHE = {}  # In-memory cache for earnings data
+EARNINGS_CACHE_EXPIRY = 3600  # Earnings cache expiry in seconds (1 hour)
+YF_DELAY = 0.5  # Delay between yfinance API calls in seconds
 
 # Setup Logging
 logging.basicConfig(
@@ -120,6 +123,17 @@ async def analyze_ticker(session, ticker, timeframe):
     return result
 
 async def fetch_earnings_data(ticker):
+    # Check in-memory cache
+    current_time = time.time()
+    if ticker in EARNINGS_CACHE:
+        cached = EARNINGS_CACHE[ticker]
+        if current_time - cached['timestamp'] < EARNINGS_CACHE_EXPIRY:
+            logger.info(f"Using cached earnings data for {ticker}")
+            return cached['data']
+    
+    # Delay to avoid yfinance rate limits
+    await asyncio.sleep(YF_DELAY)
+    
     try:
         yf_ticker = yf.Ticker(ticker)
         earnings_dates = yf_ticker.calendar
@@ -142,16 +156,26 @@ async def fetch_earnings_data(ticker):
             previous_earnings = earnings_history.index[-1] if not earnings_history.empty else pd.NaT
         else:
             previous_earnings = pd.NaT
+        
+        result = {
+            'ticker': ticker,
+            'previous_earnings': previous_earnings,
+            'next_earnings': next_earnings
+        }
+        
+        # Cache the result
+        EARNINGS_CACHE[ticker] = {
+            'timestamp': current_time,
+            'data': result
+        }
+        return result
     except Exception as e:
         logger.warning(f"Couldn't fetch earnings for {ticker}: {e}")
-        next_earnings = pd.NaT
-        previous_earnings = pd.NaT
-
-    return {
-        'ticker': ticker,
-        'previous_earnings': previous_earnings,
-        'next_earnings': next_earnings
-    }
+        return {
+            'ticker': ticker,
+            'previous_earnings': pd.NaT,
+            'next_earnings': pd.NaT
+        }
 
 async def get_filtered_tickers(rest_client):
     try:
@@ -310,8 +334,8 @@ async def main():
         logger.info("Script execution completed.")
 
 # Streamlit App
-st.title("Stock Pattern Analyzer")
-st.write("Analyze stocks for inside and engulfing bars with float traded and earnings data.")
+st.title("Pattern Analyzer")
+st.write("Analyzing.")
 
 if st.button("Run Analysis"):
     if not api_key or api_key == "bo":
