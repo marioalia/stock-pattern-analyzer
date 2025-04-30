@@ -353,8 +353,8 @@ async def main():
         logger.info("Script execution completed.")
 
 # Streamlit App
-st.title("Stock Pattern Analyzer")
-st.write("Analyze stocks for inside and engulfing bars with float traded and earnings data.")
+st.title("Pattern Analyzer")
+st.write("Analyzing")
 
 if st.button("Run Analysis"):
     if not api_key or api_key == "bo":
